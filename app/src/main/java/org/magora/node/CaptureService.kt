@@ -17,6 +17,8 @@ import android.os.IBinder
 import android.os.SystemClock
 import androidx.core.app.NotificationCompat
 import java.io.ByteArrayOutputStream
+import java.io.File
+import java.time.Instant
 import java.util.concurrent.ArrayBlockingQueue
 import java.util.concurrent.TimeUnit
 import kotlin.concurrent.thread
@@ -27,6 +29,21 @@ class CaptureService : Service() {
     @Volatile private var running = false
     @Volatile private var serviceAlive = true
     private val analysisQueue = ArrayBlockingQueue<AnalysisItem>(8)
+    @Volatile private var ingest: Ingest? = null
+    private val thermal = ThermalGovernor()
+
+    /** Phase 2 prod ingest for the imported node. Absent until a config has been imported. */
+    private class Ingest(
+        val config: NodeConfig,
+        val queue: IngestQueue,
+        val worker: IngestWorker,
+        val whitelist: SpeciesWhitelist,
+    ) {
+        fun enqueue(table: String, json: String) {
+            queue.enqueue(table, json)
+            worker.wake()
+        }
+    }
 
     private data class AnalysisItem(
         val cycleId: String,
@@ -43,6 +60,7 @@ class CaptureService : Service() {
     }
 
     override fun onStartCommand(intent: Intent?, flags: Int, startId: Int): Int {
+        ensureIngest()
         val reason = intent?.getStringExtra(EXTRA_START_REASON) ?: "system_restart"
         if (intent?.getBooleanExtra(EXTRA_RESTART_CAPTURE, false) == true) stopCaptureLoop()
         if (!running) {
@@ -64,6 +82,8 @@ class CaptureService : Service() {
         serviceAlive = false
         stopCaptureLoop()
         analysisThread?.interrupt()
+        ingest?.worker?.stop()
+        ingest = null
         NodeState.setListening(this, false)
         NodeState.setDeferred(this, false)
         DailyLog.append(this, "event=service_stop")
@@ -167,6 +187,38 @@ class CaptureService : Service() {
         }
     }
 
+    /**
+     * Starts ingest when a config has been imported (or re-imported for another node).
+     * Runs in deferred boot mode too, so queued rows drain before the mic is back.
+     */
+    @Synchronized
+    private fun ensureIngest() {
+        NodeConfig.importIfPresent(this)
+        val config = NodeConfig.load(this) ?: return
+        val current = ingest
+        if (current != null && current.config == config) return
+        current?.worker?.stop()
+        val client = SupabaseClient(config, {
+            try {
+                CredentialStore.load(this, config.nodeId)
+            } catch (error: Exception) {
+                DailyLog.append(this, "event=credential_load_error error=${error.javaClass.simpleName}")
+                null
+            }
+        })
+        // One queue per node: rows carry their node_id, and only that node's credentials may send them.
+        val queue = IngestQueue.forDirectory(File(File(filesDir, "ingest"), config.nodeId))
+        val worker = IngestWorker(this, queue, client)
+        val whitelist = SpeciesWhitelist(this, config.nodeId)
+        val next = Ingest(config, queue, worker, whitelist)
+        ingest = next
+        DailyLog.append(this, "event=ingest_start node_id=${config.nodeId} queue_depth=${queue.depth()} posting=${NodeState.postingEnabled(this)}")
+        worker.start()
+        thread(name = "magora-whitelist") {
+            whitelist.resolve(client) { serviceAlive && ingest === next }
+        }
+    }
+
     private fun ensureAnalysisThread() {
         if (analysisThread?.isAlive == true) return
         analysisThread = thread(name = "magora-analysis") { analysisLoop() }
@@ -175,10 +227,13 @@ class CaptureService : Service() {
     private fun analysisLoop() {
         val birdnet = try {
             BirdnetAnalyzer(applicationContext)
-        } catch (error: Exception) {
+        } catch (error: Throwable) {
             DailyLog.append(this, "event=analysis_error error=${error.javaClass.simpleName} at=model_load")
             null
         }
+        var locationFilter: LocationFilter? = null
+        var locationFilterFailed = false
+        var whitelistWaitedFor: Ingest? = null
         while (serviceAlive) {
             val item = try {
                 analysisQueue.poll(1, TimeUnit.SECONDS)
@@ -186,22 +241,94 @@ class CaptureService : Service() {
                 return
             } ?: continue
             try {
+                val now = Instant.parse(item.cycleId)
                 val aci = AcousticComplexity.calculate(item.samples, BirdnetAnalyzer.SAMPLE_RATE)
-                val detections = birdnet?.analyze(item.samples) ?: emptyList()
+
+                when (thermal.update(item.battery.temperatureC)) {
+                    ThermalGovernor.Transition.PAUSED -> {
+                        NodeState.setInferencePaused(this, true)
+                        DailyLog.append(this, "event=thermal_pause cycle_id=${item.cycleId} battery_temp_c=${BatteryInfo.formatTemp(item.battery.temperatureC)}")
+                    }
+                    ThermalGovernor.Transition.RESUMED -> {
+                        NodeState.setInferencePaused(this, false)
+                        DailyLog.append(this, "event=thermal_resume cycle_id=${item.cycleId} battery_temp_c=${BatteryInfo.formatTemp(item.battery.temperatureC)}")
+                    }
+                    null -> Unit
+                }
+                val detections = if (thermal.paused) emptyList() else birdnet?.analyze(item.samples) ?: emptyList()
+
+                val ing = ingest
+                val config = ing?.config
+                if (ing != null && whitelistWaitedFor !== ing) {
+                    // Like detect.py, resolve the whitelist before the first detection is judged.
+                    if (!ing.whitelist.await(WHITELIST_WAIT_MILLIS)) DailyLog.append(this, "event=whitelist_wait_timeout")
+                    whitelistWaitedFor = ing
+                }
+                if (config != null && locationFilter == null && !locationFilterFailed) {
+                    locationFilter = try {
+                        LocationFilter(applicationContext)
+                    } catch (error: Throwable) {
+                        locationFilterFailed = true
+                        DailyLog.append(this, "event=location_filter_error error=${error.javaClass.simpleName}")
+                        null
+                    }
+                }
+                val week48 = Temporal.week48(now)
+                // birdnetlib applies the location filter only when lat and lon are both truthy.
+                val allow = if (config != null && config.lat != 0.0 && config.lon != 0.0) {
+                    locationFilter?.allowList(config.lat, config.lon, week48)
+                } else {
+                    null
+                }
+                val whitelist = ing?.whitelist?.species
+                if (ing != null) {
+                    NodeState.setFilterStatus(this, "${ing.whitelist.source}:${whitelist?.size ?: 0}", allow?.size ?: -1, week48)
+                }
+
+                val posting = ing != null && NodeState.postingEnabled(this)
+                val temporal = config?.let { Temporal.context(now, it.lat, it.lon) }
+                // A persistence failure must never cost the raw log its detection lines.
+                fun tryEnqueue(table: String, json: () -> String): Boolean = try {
+                    ing!!.enqueue(table, json())
+                    true
+                } catch (error: Exception) {
+                    DailyLog.append(this, "event=enqueue_error cycle_id=${item.cycleId} table=$table error=${error.javaClass.simpleName}")
+                    false
+                }
+
+                var aciQueued = false
+                if (posting && aci != null && config != null && temporal != null) {
+                    aciQueued = tryEnqueue("aci_logs") { Rows.aci(config.site, aci, now, temporal) }
+                }
+
+                var posted = 0
                 for (d in detections) {
+                    val decision = DetectionFilter.decide(d.commonName, d.scientificName, d.confidence, allow, whitelist)
+                    val outcome = when {
+                        !decision.post -> "decision=filtered reason=${decision.reason!!.logName}"
+                        ing == null || config == null || temporal == null -> "decision=held reason=no_config"
+                        !posting -> "decision=held reason=posting_off"
+                        tryEnqueue("detections") { Rows.detection(config.site, d.commonName, d.scientificName, d.confidence, now, temporal) } -> {
+                            posted++
+                            if (decision.unusual) "decision=posted unusual=true" else "decision=posted"
+                        }
+                        else -> "decision=enqueue_failed"
+                    }
                     DailyLog.append(
                         this,
                         "event=detection cycle_id=${item.cycleId} common=\"${d.commonName}\" scientific=\"${d.scientificName}\" " +
-                            "confidence=${d.confidence} window_start_s=${d.windowStartSecs} window_end_s=${d.windowEndSecs}"
+                            "confidence=${d.confidence} window_start_s=${d.windowStartSecs} window_end_s=${d.windowEndSecs} $outcome"
                     )
                 }
                 DailyLog.append(
                     this,
-                    "event=analysis cycle_id=${item.cycleId} aci=$aci detections=${detections.size} " +
+                    "event=analysis cycle_id=${item.cycleId} aci=$aci detections=${detections.size} posted=$posted aci_queued=$aciQueued " +
+                        "inference=${if (thermal.paused) "paused_thermal" else "ran"} " +
                         "granted_source=${item.source} input_device=${item.inputDevice} " +
                         "battery_pct=${item.battery.percent} battery_temp_c=${BatteryInfo.formatTemp(item.battery.temperatureC)} charging=${item.battery.state}"
                 )
-            } catch (error: Exception) {
+            } catch (error: Throwable) {
+                // Errors too (e.g. a missing platform API): never let one cycle kill the process.
                 DailyLog.append(this, "event=analysis_error cycle_id=${item.cycleId} error=${error.javaClass.simpleName}")
             }
         }
@@ -301,5 +428,6 @@ class CaptureService : Service() {
         const val EXTRA_START_REASON = "start_reason"
         const val CHANNEL_ID = "magora_node_capture"
         const val NOTIFICATION_ID = 1
+        const val WHITELIST_WAIT_MILLIS = 5L * 60 * 1000
     }
 }

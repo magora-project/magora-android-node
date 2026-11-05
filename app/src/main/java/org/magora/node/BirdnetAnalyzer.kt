@@ -10,8 +10,11 @@ import kotlin.math.exp
  * On-device BirdNET inference. Uses the exact model and inference semantics of the
  * deployed Pi firmware (detect.py at pin f0c1940, via birdnetlib's default Analyzer):
  * BirdNET_GLOBAL_6K_V2.4_Model_FP32.tflite, 48 kHz mono float audio, 3 s chunks with
- * 1.5 s overlap (tails shorter than 1.5 s dropped, shorter tails zero-padded), sigmoid
- * sensitivity 1.25. The Pi posts at min_conf 0.20; the phone logs locally at >= 0.10.
+ * 1.5 s overlap (tails shorter than 1.5 s dropped, shorter tails zero-padded), and
+ * detect.py's sensitivity=1.25. birdnetlib's RecordingBase converts that user sensitivity
+ * to max(0.5, min(1.0 - (sensitivity - 1.0), 1.5)) = 0.75 before its flat sigmoid
+ * 1 / (1 + exp(-0.75 * clip(logit, -15, 15))); that converted value is applied here.
+ * The phone logs locally at >= 0.10; DetectionFilter decides what is posted.
  */
 class BirdnetAnalyzer(context: Context) {
 
@@ -49,7 +52,7 @@ class BirdnetAnalyzer(context: Context) {
             interpreter.run(arrayOf(chunk), output)
             val logits = output[0]
             for (i in logits.indices) {
-                val confidence = 1.0f / (1.0f + exp(-SENSITIVITY * logits[i].coerceIn(-15f, 15f)))
+                val confidence = sigmoid(logits[i])
                 if (confidence >= MIN_CONFIDENCE) {
                     val parts = labels[i].split("_", limit = 2)
                     detections.add(
@@ -70,10 +73,17 @@ class BirdnetAnalyzer(context: Context) {
     }
 
     companion object {
+        /** birdnetlib flat_sigmoid with the converted sensitivity; float32 like numpy. */
+        fun sigmoid(logit: Float): Float = 1.0f / (1.0f + exp(-EFFECTIVE_SENSITIVITY * logit.coerceIn(-15f, 15f)))
+
+        /** birdnetlib RecordingBase: max(0.5, min(1.0 - (sensitivity - 1.0), 1.5)). */
+        val EFFECTIVE_SENSITIVITY: Float = maxOf(0.5, minOf(1.0 - (SENSITIVITY_SETTING - 1.0), 1.5)).toFloat()
+
         const val SAMPLE_RATE = 48_000
         const val SAMPLE_SECS = 3.0
         const val OVERLAP_SECS = 1.5
-        const val SENSITIVITY = 1.25f
+        /** detect.py SENSITIVITY, as passed to birdnetlib's Recording. */
+        const val SENSITIVITY_SETTING = 1.25
         const val MIN_CONFIDENCE = 0.10f
         const val CHUNK_SAMPLES = 144_000
         const val MIN_CHUNK_SAMPLES = 72_000

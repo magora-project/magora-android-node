@@ -28,6 +28,8 @@ class MainActivity : Activity() {
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
         status = TextView(this)
+        // Phase 2: consume files/magora-config.json once (it is deleted afterwards).
+        NodeConfig.importIfPresent(this)
 
         requestNotificationPermission()
 
@@ -41,6 +43,19 @@ class MainActivity : Activity() {
             }
         }
 
+        val posting = Button(this)
+        fun renderPosting() {
+            posting.text = if (NodeState.postingEnabled(this)) "Posting to Magora: ON (tap to stop)" else "Posting to Magora: OFF (tap to resume)"
+        }
+        renderPosting()
+        posting.setOnClickListener {
+            val enabled = !NodeState.postingEnabled(this)
+            NodeState.setPostingEnabled(this, enabled)
+            DailyLog.append(this, "event=posting_toggled enabled=$enabled")
+            renderPosting()
+            refreshStatus()
+        }
+
         val battery = Button(this).apply { text = "Allow while battery optimized" }
         battery.setOnClickListener { requestBatteryExemption() }
 
@@ -49,6 +64,7 @@ class MainActivity : Activity() {
             setPadding(48, 48, 48, 48)
             addView(status)
             addView(startStop)
+            addView(posting)
             addView(battery)
         }
         setContentView(layout)
@@ -104,6 +120,43 @@ class MainActivity : Activity() {
         }
     }
 
+    private fun ingestStatus(): String {
+        val config = NodeConfig.load(this) ?: return "\nMagora ingest: no node config imported (local only)"
+        val ctx = this
+        return buildString {
+            append("\nNode: ${config.nodeName}\n")
+            append("Posting: ${if (NodeState.postingEnabled(ctx)) "ON" else "OFF (local toggle)"}\n")
+            val authAt = NodeState.authAt(ctx)
+            append(
+                when (NodeState.authState(ctx)) {
+                    "ok" -> "Auth: OK (${since(authAt)})\n"
+                    "failed" -> "Auth: FAILED, HTTP ${NodeState.authStatus(ctx)} (${since(authAt)})\n"
+                    else -> "Auth: not yet\n"
+                }
+            )
+            val lastPost = NodeState.lastPostAt(ctx)
+            append("Last successful post: ${if (lastPost == 0L) "never" else "${Rows.timestamp(java.time.Instant.ofEpochMilli(lastPost))} (${since(lastPost)})"}\n")
+            append("Queue depth: ${NodeState.queueDepth(ctx)} (parked: ${NodeState.queueParked(ctx)})\n")
+            NodeState.backoffReason(ctx)?.let { reason ->
+                val until = NodeState.backoffUntil(ctx)
+                if (until > System.currentTimeMillis()) append("Retrying after: $reason, in ${(until - System.currentTimeMillis()) / 1000}s\n")
+            }
+            append("Whitelist: ${NodeState.whitelistStatus(ctx)}\n")
+            val species = NodeState.locationSpecies(ctx)
+            append("Location filter: ${if (species < 0) "not active" else "$species species, week ${NodeState.locationWeek(ctx)}/48"}")
+        }
+    }
+
+    private fun since(millis: Long): String {
+        if (millis == 0L) return "never"
+        val seconds = (System.currentTimeMillis() - millis) / 1000
+        return when {
+            seconds < 120 -> "${seconds}s ago"
+            seconds < 7200 -> "${seconds / 60}m ago"
+            else -> "${seconds / 3600}h ago"
+        }
+    }
+
     private fun refreshStatus() {
         val batteryStatus = registerReceiver(null, IntentFilter(Intent.ACTION_BATTERY_CHANGED))
         val temperature = batteryStatus?.getIntExtra(BatteryManager.EXTRA_TEMPERATURE, -1) ?: -1
@@ -115,8 +168,11 @@ class MainActivity : Activity() {
             append("Granted source: ${NodeState.source(this@MainActivity)}\n")
             append("Cycles completed: ${NodeState.cycles(this@MainActivity)}\n")
             append("Uptime: $uptime\n")
-            append("Battery temperature: ${if (temperature >= 0) String.format("%.1f °C", temperature / 10f) else "Unknown"}")
+            append("Battery temperature: ${if (temperature >= 0) String.format("%.1f °C", temperature / 10f) else "Unknown"}\n")
+            append("BirdNET inference: ${if (NodeState.inferencePaused(this@MainActivity)) "PAUSED (battery >= 45 °C; resumes below 40 °C)" else "running"}\n")
+            append(ingestStatus())
         }
+        handler.removeCallbacksAndMessages(null)
         handler.postDelayed(this::refreshStatus, 1000)
     }
 }
