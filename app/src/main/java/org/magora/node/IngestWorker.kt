@@ -81,7 +81,10 @@ class IngestWorker(
         }
     }
 
+    private fun postingAllowed(): Boolean = alive && NodeState.postingEnabled(context)
+
     private fun deliver(entry: IngestQueue.Entry) {
+        if (!postingAllowed()) return
         try {
             client.ensureToken()
             NodeState.setAuth(context, ok = true, status = 200)
@@ -95,6 +98,9 @@ class IngestWorker(
             return
         }
 
+        // The posting switch is re-checked before every HTTP attempt, so OFF stops any request
+        // that has not started yet (one already in flight is allowed to finish).
+        if (!postingAllowed()) return
         var status = try {
             client.postRow(entry.table, entry.json)
         } catch (_: IOException) {
@@ -104,8 +110,10 @@ class IngestWorker(
         if (status == 401) {
             DailyLog.append(context, "event=post_unauthorized seq=${entry.seq} action=reauth")
             try {
+                if (!postingAllowed()) return
                 client.signIn()
                 NodeState.setAuth(context, ok = true, status = 200)
+                if (!postingAllowed()) return
                 status = client.postRow(entry.table, entry.json)
             } catch (error: SupabaseClient.AuthException) {
                 NodeState.setAuth(context, ok = false, status = error.status)

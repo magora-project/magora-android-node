@@ -97,6 +97,11 @@ data class NodeConfig(
                     .filter { !json.has(it) || json.isNull(it) }
                 require(missing.isEmpty()) { "missing_fields=${missing.joinToString(",")}" }
                 val nodeId = UUID.fromString(json.getString("node_id")).toString()
+                // Node identity is fixed once imported. Switching this phone to another node
+                // means clearing app data (`pm clear org.magora.node`), which also discards the
+                // old node's queue and credentials; nothing is re-pointed under a running service.
+                val existing = load(context)?.nodeId
+                require(existing == null || existing == nodeId) { "different_node_requires_app_data_reset" }
                 val lat = json.getDouble("lat")
                 val lon = json.getDouble("lon")
                 require(lat in -90.0..90.0 && lon in -180.0..180.0) { "coordinates_out_of_range" }
@@ -161,16 +166,8 @@ object CredentialStore {
         val cipher = Cipher.getInstance(TRANSFORMATION)
         cipher.init(Cipher.DECRYPT_MODE, key(), GCMParameterSpec(128, Base64.decode(iv, Base64.NO_WRAP)))
         val json = JSONObject(String(cipher.doFinal(Base64.decode(ct, Base64.NO_WRAP)), Charsets.UTF_8))
-        val credentials = NodeConfig.Credentials(json.getString("e"), json.getString("p"))
-        val bound = json.optString("n", "")
-        if (bound.isEmpty()) {
-            // Sealed by the pre-binding prototype build: accept it only for the node whose
-            // config was imported alongside it, then rebind it.
-            if (NodeConfig.load(context)?.nodeId != nodeId) return null
-            save(context, nodeId, credentials)
-            return credentials
-        }
-        return if (bound == nodeId) credentials else null
+        if (json.optString("n", "") != nodeId) return null
+        return NodeConfig.Credentials(json.getString("e"), json.getString("p"))
     }
 
     private fun key(): SecretKey {

@@ -45,11 +45,23 @@ class IngestQueue internal constructor(
     fun enqueue(table: String, json: String): Entry {
         require(table in TABLES) { "unknown table" }
         require('\n' !in json && '\r' !in json) { "row JSON must be one line" }
-        val entry = Entry(nextSeq++, table, clock(), json)
-        FileOutputStream(queueFile, true).use { out ->
-            out.write("${entry.seq}\t${entry.table}\t${entry.enqueuedAt}\t${entry.json}\n".toByteArray(Charsets.UTF_8))
-            out.fd.sync()
+        val entry = Entry(nextSeq, table, clock(), json)
+        val lengthBefore = queueFile.length()
+        try {
+            FileOutputStream(queueFile, true).use { out ->
+                out.write("${entry.seq}\t${entry.table}\t${entry.enqueuedAt}\t${entry.json}\n".toByteArray(Charsets.UTF_8))
+                out.fd.sync()
+            }
+        } catch (error: Exception) {
+            // Never leave a partial line for the next append to join: cut back to the last whole row.
+            try {
+                java.io.RandomAccessFile(queueFile, "rw").use { it.setLength(lengthBefore) }
+            } catch (_: Exception) {
+                compact()
+            }
+            throw error
         }
+        nextSeq++
         entries.addLast(entry)
         return entry
     }
