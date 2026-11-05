@@ -16,7 +16,7 @@ import java.io.FileOutputStream
  * Delivery is at-least-once: a crash between a successful POST and the head write re-sends
  * that one row after restart.
  */
-class IngestQueue(
+class IngestQueue internal constructor(
     private val dir: File,
     private val maxAgeMillis: Long = SEVEN_DAYS_MILLIS,
     private val clock: () -> Long = System::currentTimeMillis,
@@ -62,7 +62,10 @@ class IngestQueue(
             expired = true
             onExpired(dropped)
         }
-        if (expired) persistHead()
+        if (expired) {
+            persistHead()
+            maybeCompact()
+        }
         return entries.firstOrNull()
     }
 
@@ -116,9 +119,24 @@ class IngestQueue(
                 }
             }
         }
-        parked = if (parkedFile.exists()) parkedFile.useLines { lines -> lines.count { it.isNotBlank() } } else 0
+        trimParked()
         nextSeq = maxSeq + 1
         compact()
+    }
+
+    /** parked.log keeps the same 7-day bound as the queue. */
+    private fun trimParked() {
+        if (!parkedFile.exists()) {
+            parked = 0
+            return
+        }
+        val cutoff = clock() - maxAgeMillis
+        val keep = parkedFile.readLines(Charsets.UTF_8).filter { line ->
+            val enqueuedAt = line.split('\t', limit = 4).getOrNull(2)?.toLongOrNull()
+            line.isNotBlank() && enqueuedAt != null && enqueuedAt >= cutoff
+        }
+        writeAtomically(parkedFile, keep.joinToString("") { "$it\n" })
+        parked = keep.size
     }
 
     private fun persistHead() {
@@ -150,6 +168,17 @@ class IngestQueue(
     }
 
     companion object {
+        private val open = HashMap<String, IngestQueue>()
+
+        /**
+         * The single in-process owner of [dir]. Every producer and worker for a directory
+         * must share it, or two instances could compact over each other's rows.
+         */
+        @JvmStatic
+        fun forDirectory(dir: File): IngestQueue = synchronized(open) {
+            open.getOrPut(dir.canonicalPath) { IngestQueue(dir) }
+        }
+
         const val SEVEN_DAYS_MILLIS = 7L * 24 * 60 * 60 * 1000
         const val COMPACT_EVERY = 500
         val TABLES = setOf("detections", "aci_logs")

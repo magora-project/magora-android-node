@@ -2,6 +2,7 @@ package org.magora.node
 
 import org.junit.Assert.assertEquals
 import org.junit.Assert.assertNull
+import org.junit.Assert.assertSame
 import org.junit.Rule
 import org.junit.Test
 import org.junit.rules.TemporaryFolder
@@ -69,6 +70,30 @@ class IngestQueueTest {
         assertEquals(row(2), q.peek { expired += it.json }!!.json)
         assertEquals(listOf(row(1)), expired)
         assertEquals(listOf(row(2)), IngestQueue(dir, clock = { now }).snapshot().map { it.json })
+    }
+
+    @Test
+    fun expiryCompactsTheLogAndParkedRowsAgeOut() {
+        val dir = tmp.newFolder("ingest")
+        var now = 1_000_000_000_000L
+        val q = IngestQueue(dir, clock = { now })
+        q.enqueue("detections", row(0))
+        q.park(q.peek()!!.seq, 400)
+        // Compaction runs once COMPACT_EVERY rows are done, so stale lines stay bounded.
+        for (i in 1..600) q.enqueue("aci_logs", row(i))
+        now += IngestQueue.SEVEN_DAYS_MILLIS + 1
+        q.enqueue("aci_logs", row(99))
+        assertEquals(row(99), q.peek()!!.json)
+        assertEquals(1, File(dir, "queue.log").readLines().size)
+        val restarted = IngestQueue(dir, clock = { now })
+        assertEquals(0, restarted.parkedCount())
+        assertEquals(0, File(dir, "parked.log").readLines().count { it.isNotBlank() })
+    }
+
+    @Test
+    fun oneQueueInstancePerDirectory() {
+        val dir = tmp.newFolder("ingest")
+        assertSame(IngestQueue.forDirectory(dir), IngestQueue.forDirectory(File(dir.path)))
     }
 
     @Test

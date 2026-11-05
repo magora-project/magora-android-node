@@ -33,7 +33,7 @@ object Temporal {
     fun context(now: Instant, lat: Double, lon: Double): Context {
         val category = timeCategory(now, lat, lon)
         val sunrise = try {
-            Astral.sun(LocalDate.ofInstant(now, ZoneOffset.UTC), lat, lon).sunrise
+            Astral.sun(now.atOffset(ZoneOffset.UTC).toLocalDate(), lat, lon).sunrise
         } catch (_: Astral.SunError) {
             null
         }
@@ -45,7 +45,7 @@ object Temporal {
 
     fun timeCategory(now: Instant, lat: Double, lon: Double): String {
         val sun = try {
-            Astral.sun(LocalDate.ofInstant(now, ZoneOffset.UTC), lat, lon)
+            Astral.sun(now.atOffset(ZoneOffset.UTC).toLocalDate(), lat, lon)
         } catch (_: Astral.SunError) {
             return fallbackCategory(now.atOffset(ZoneOffset.UTC).hour)
         }
@@ -87,12 +87,12 @@ object Temporal {
 
     /** birdnetlib.utils.return_week_48_from_datetime, on the UTC date. */
     fun week48(now: Instant): Int {
-        val date = LocalDate.ofInstant(now, ZoneOffset.UTC)
+        val date = now.atOffset(ZoneOffset.UTC).toLocalDate()
         val daysInYear = if (date.isLeapYear) 366 else 365
         return ceil((date.dayOfYear.toDouble() / daysInYear) * 48).toInt()
     }
 
-    private fun dayOfYear(now: Instant): Int = LocalDate.ofInstant(now, ZoneOffset.UTC).dayOfYear
+    private fun dayOfYear(now: Instant): Int = now.atOffset(ZoneOffset.UTC).toLocalDate().dayOfYear
 
     /** Python datetime arithmetic is microsecond-precise; truncate toward zero like timedelta. */
     private fun micros(d: Duration): Long = d.seconds * 1_000_000L + d.nano / 1_000
@@ -122,11 +122,11 @@ object Temporal {
 
         private fun transitOnDate(date: LocalDate, lat: Double, lon: Double, zenith: Double, direction: Direction, what: String): Instant {
             var tot = timeOfTransit(date, lat, lon, zenith, direction)
-            var totDate = LocalDate.ofInstant(tot, ZoneOffset.UTC)
+            var totDate = tot.atOffset(ZoneOffset.UTC).toLocalDate()
             if (totDate != date) {
                 val newDate = if (totDate < date) date.plusDays(1) else date.minusDays(1)
                 tot = timeOfTransit(newDate, lat, lon, zenith, direction)
-                totDate = LocalDate.ofInstant(tot, ZoneOffset.UTC)
+                totDate = tot.atOffset(ZoneOffset.UTC).toLocalDate()
                 if (totDate != date) throw SunError("Unable to find a $what time on the date specified")
             }
             return tot

@@ -13,8 +13,9 @@ import java.util.concurrent.TimeUnit
  * null/empty server value stops retrying and falls back to the cache; with no usable server
  * value or cache, detections run without species filtering.
  */
-class SpeciesWhitelist(private val context: Context) {
-    private val cacheFile = File(context.filesDir, "species_whitelist.json")
+class SpeciesWhitelist(private val context: Context, nodeId: String) {
+    /** Cached per node, so a re-provisioned phone never filters with another node's list. */
+    private val cacheFile = File(context.filesDir, "species_whitelist-$nodeId.json")
     private val resolved = CountDownLatch(1)
 
     @Volatile

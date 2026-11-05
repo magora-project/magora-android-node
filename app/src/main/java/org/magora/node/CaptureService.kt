@@ -206,9 +206,10 @@ class CaptureService : Service() {
                 null
             }
         })
-        val queue = IngestQueue(File(filesDir, "ingest"))
+        // One queue per node: rows carry their node_id, and only that node's credentials may send them.
+        val queue = IngestQueue.forDirectory(File(File(filesDir, "ingest"), config.nodeId))
         val worker = IngestWorker(this, queue, client)
-        val whitelist = SpeciesWhitelist(this)
+        val whitelist = SpeciesWhitelist(this, config.nodeId)
         val next = Ingest(config, queue, worker, whitelist)
         ingest = next
         DailyLog.append(this, "event=ingest_start node_id=${config.nodeId} queue_depth=${queue.depth()} posting=${NodeState.postingEnabled(this)}")
@@ -286,10 +287,18 @@ class CaptureService : Service() {
 
                 val posting = ing != null && NodeState.postingEnabled(this)
                 val temporal = config?.let { Temporal.context(now, it.lat, it.lon) }
+                // A persistence failure must never cost the raw log its detection lines.
+                fun tryEnqueue(table: String, json: () -> String): Boolean = try {
+                    ing!!.enqueue(table, json())
+                    true
+                } catch (error: Exception) {
+                    DailyLog.append(this, "event=enqueue_error cycle_id=${item.cycleId} table=$table error=${error.javaClass.simpleName}")
+                    false
+                }
+
                 var aciQueued = false
                 if (posting && aci != null && config != null && temporal != null) {
-                    ing!!.enqueue("aci_logs", Rows.aci(config.site, aci, now, temporal))
-                    aciQueued = true
+                    aciQueued = tryEnqueue("aci_logs") { Rows.aci(config.site, aci, now, temporal) }
                 }
 
                 var posted = 0
@@ -299,11 +308,11 @@ class CaptureService : Service() {
                         !decision.post -> "decision=filtered reason=${decision.reason!!.logName}"
                         ing == null || config == null || temporal == null -> "decision=held reason=no_config"
                         !posting -> "decision=held reason=posting_off"
-                        else -> {
-                            ing.enqueue("detections", Rows.detection(config.site, d.commonName, d.scientificName, d.confidence, now, temporal))
+                        tryEnqueue("detections") { Rows.detection(config.site, d.commonName, d.scientificName, d.confidence, now, temporal) } -> {
                             posted++
                             if (decision.unusual) "decision=posted unusual=true" else "decision=posted"
                         }
+                        else -> "decision=enqueue_failed"
                     }
                     DailyLog.append(
                         this,
@@ -318,7 +327,8 @@ class CaptureService : Service() {
                         "granted_source=${item.source} input_device=${item.inputDevice} " +
                         "battery_pct=${item.battery.percent} battery_temp_c=${BatteryInfo.formatTemp(item.battery.temperatureC)} charging=${item.battery.state}"
                 )
-            } catch (error: Exception) {
+            } catch (error: Throwable) {
+                // Errors too (e.g. a missing platform API): never let one cycle kill the process.
                 DailyLog.append(this, "event=analysis_error cycle_id=${item.cycleId} error=${error.javaClass.simpleName}")
             }
         }
