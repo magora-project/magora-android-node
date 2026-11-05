@@ -28,6 +28,11 @@ class MainActivity : Activity() {
         super.onCreate(savedInstanceState)
         status = TextView(this)
 
+        requestNotificationPermission()
+        if (ContextCompat.checkSelfPermission(this, Manifest.permission.RECORD_AUDIO) == PackageManager.PERMISSION_GRANTED) {
+            if (!NodeState.listening(this)) startCapture()
+        }
+
         val startStop = Button(this).apply { text = "Start listening" }
         startStop.setOnClickListener {
             if (NodeState.listening(this@MainActivity)) {
@@ -55,6 +60,14 @@ class MainActivity : Activity() {
     override fun onResume() {
         super.onResume()
         handler.postDelayed(this::refreshStatus, 1000)
+    }
+
+    private fun requestNotificationPermission() {
+        if (Build.VERSION.SDK_INT >= 33 &&
+            ContextCompat.checkSelfPermission(this, Manifest.permission.POST_NOTIFICATIONS) != PackageManager.PERMISSION_GRANTED
+        ) {
+            ActivityCompat.requestPermissions(this, arrayOf(Manifest.permission.POST_NOTIFICATIONS), 1002)
+        }
     }
 
     private fun requestMicPermissionAndStart() {

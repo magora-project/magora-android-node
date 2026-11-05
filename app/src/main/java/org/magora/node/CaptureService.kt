@@ -86,12 +86,34 @@ class CaptureService : Service() {
                 NodeState.setCycleFields(this, grantedSourceName, activeInputDevice(this))
                 val buffer = ByteArray(4096)
                 val deadline = SystemClock.elapsedRealtime() + 15_000L
+                var totalSquares = 0L
+                var sampleCount = 0
+                var peak = 0
                 while (running && SystemClock.elapsedRealtime() < deadline && !Thread.currentThread().isInterrupted) {
                     val read = record.read(buffer, 0, buffer.size)
-                    if (read > 0) file.appendBytes(buffer.copyOf(read))
+                    if (read > 0) {
+                        file.appendBytes(buffer.copyOf(read))
+                        var index = 0
+                        while (index + 1 < read) {
+                            val sample = (buffer[index].toInt() and 0xff or (buffer[index + 1].toInt() shl 8)).toShort().toInt()
+                            val absolute = kotlin.math.abs(sample)
+                            peak = kotlin.math.max(peak, absolute)
+                            totalSquares += sample.toLong() * sample.toLong()
+                            sampleCount++
+                            index += 2
+                        }
+                    }
                 }
-                NodeState.incrementCycles(this)
-                DailyLog.append(this, "event=cycle_stop granted_source=$grantedSourceName input_device=${activeInputDevice(this)} duration_ms=15000")
+                val rms = if (sampleCount > 0) kotlin.math.sqrt(totalSquares.toDouble() / sampleCount) else 0.0
+                val silent = peak <= 1
+                if (silent) {
+                    DailyLog.append(this, "event=cycle_silent granted_source=$grantedSourceName input_device=${activeInputDevice(this)} duration_ms=15000 rms=$rms peak=$peak")
+                    BootReceiver.postResumeNotification(this)
+                } else {
+                    NodeState.incrementCycles(this)
+                    DailyLog.append(this, "event=cycle_stop granted_source=$grantedSourceName input_device=${activeInputDevice(this)} duration_ms=15000 rms=$rms peak=$peak result=success")
+                }
+                file.delete()
             } catch (error: Exception) {
                 DailyLog.append(this, "event=cycle_error error=${error.javaClass.simpleName}")
             } finally {
