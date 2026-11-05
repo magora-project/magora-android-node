@@ -13,10 +13,21 @@ class BootReceiver : BroadcastReceiver() {
     override fun onReceive(context: Context, intent: Intent) {
         if (intent.action != Intent.ACTION_BOOT_COMPLETED) return
         if (!NodeState.listening(context)) return
+        // Start foreground in deferred mode (no microphone while backgrounded); the
+        // home activity takes over when it shows. The notification is the fallback.
+        val serviceIntent = Intent(context, CaptureService::class.java)
+            .putExtra(CaptureService.EXTRA_START_REASON, "boot")
+            .putExtra(CaptureService.EXTRA_DEFER_CAPTURE, true)
+        try {
+            ContextCompat.startForegroundService(context, serviceIntent)
+        } catch (_: Exception) {
+        }
         postResumeNotification(context)
     }
 
     companion object {
+        const val RESUME_NOTIFICATION_ID = 2
+
         @JvmStatic
         fun postResumeNotification(context: Context) {
             val channelId = "magora_node_resume"
@@ -33,7 +44,7 @@ class BootReceiver : BroadcastReceiver() {
                 PendingIntent.FLAG_UPDATE_CURRENT or PendingIntent.FLAG_IMMUTABLE
             )
             manager.notify(
-                2,
+                RESUME_NOTIFICATION_ID,
                 NotificationCompat.Builder(context, channelId)
                     .setSmallIcon(R.drawable.ic_node)
                     .setContentTitle("Tap to resume listening")

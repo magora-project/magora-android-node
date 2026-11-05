@@ -2,6 +2,7 @@ package org.magora.node
 
 import android.Manifest
 import android.app.Activity
+import android.app.NotificationManager
 import android.content.Context
 import android.content.Intent
 import android.content.IntentFilter
@@ -29,9 +30,6 @@ class MainActivity : Activity() {
         status = TextView(this)
 
         requestNotificationPermission()
-        if (ContextCompat.checkSelfPermission(this, Manifest.permission.RECORD_AUDIO) == PackageManager.PERMISSION_GRANTED) {
-            if (!NodeState.listening(this)) startCapture()
-        }
 
         val startStop = Button(this).apply { text = "Start listening" }
         startStop.setOnClickListener {
@@ -59,8 +57,13 @@ class MainActivity : Activity() {
 
     override fun onResume() {
         super.onResume()
+        getSystemService(NotificationManager::class.java).cancel(BootReceiver.RESUME_NOTIFICATION_ID)
         if (ContextCompat.checkSelfPermission(this, Manifest.permission.RECORD_AUDIO) == PackageManager.PERMISSION_GRANTED) {
-            startCapture(restartExisting = true)
+            val reason = if (intent?.hasCategory(Intent.CATEGORY_HOME) == true) "home" else "manual"
+            when {
+                NodeState.deferred(this) || NodeState.lastCycleSilent(this) -> startCapture(reason, restartExisting = true)
+                else -> startCapture(reason)
+            }
         }
         handler.postDelayed(this::refreshStatus, 1000)
     }
@@ -75,18 +78,19 @@ class MainActivity : Activity() {
 
     private fun requestMicPermissionAndStart() {
         if (ContextCompat.checkSelfPermission(this, Manifest.permission.RECORD_AUDIO) == PackageManager.PERMISSION_GRANTED) {
-            startCapture()
+            startCapture("manual")
         } else {
             ActivityCompat.requestPermissions(this, arrayOf(Manifest.permission.RECORD_AUDIO), 1001)
         }
     }
 
     override fun onRequestPermissionsResult(requestCode: Int, permissions: Array<out String>, grantResults: IntArray) {
-        if (requestCode == 1001 && grantResults.firstOrNull() == PackageManager.PERMISSION_GRANTED) startCapture()
+        if (requestCode == 1001 && grantResults.firstOrNull() == PackageManager.PERMISSION_GRANTED) startCapture("manual")
     }
 
-    private fun startCapture(restartExisting: Boolean = false) {
+    private fun startCapture(reason: String, restartExisting: Boolean = false) {
         val intent = Intent(this, CaptureService::class.java)
+            .putExtra(CaptureService.EXTRA_START_REASON, reason)
             .putExtra(CaptureService.EXTRA_RESTART_CAPTURE, restartExisting)
         ContextCompat.startForegroundService(this, intent)
         refreshStatus()
