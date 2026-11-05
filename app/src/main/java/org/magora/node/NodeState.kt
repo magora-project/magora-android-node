@@ -52,4 +52,70 @@ object NodeState {
     }
 
     fun startReason(context: Context): String = prefs(context).getString("start_reason", "unknown") ?: "unknown"
+
+    // --- Phase 2 ingest status (shown on the status screen; never holds secrets) ---
+
+    /** Local-only switch: when off, nothing is enqueued or posted. On by default. */
+    fun postingEnabled(context: Context): Boolean = prefs(context).getBoolean("posting_enabled", true)
+
+    fun setPostingEnabled(context: Context, enabled: Boolean) {
+        prefs(context).edit().putBoolean("posting_enabled", enabled).apply()
+    }
+
+    fun setAuth(context: Context, ok: Boolean, status: Int) {
+        prefs(context).edit()
+            .putString("auth_state", if (ok) "ok" else "failed")
+            .putInt("auth_status", status)
+            .putLong("auth_at", System.currentTimeMillis())
+            .apply()
+    }
+
+    fun authState(context: Context): String = prefs(context).getString("auth_state", "not yet") ?: "not yet"
+    fun authStatus(context: Context): Int = prefs(context).getInt("auth_status", 0)
+    fun authAt(context: Context): Long = prefs(context).getLong("auth_at", 0L)
+
+    fun setLastPost(context: Context, millis: Long) {
+        prefs(context).edit().putLong("last_post_at", millis).remove("backoff_reason").apply()
+    }
+
+    fun lastPostAt(context: Context): Long = prefs(context).getLong("last_post_at", 0L)
+
+    fun setQueue(context: Context, depth: Int, parked: Int) {
+        prefs(context).edit().putInt("queue_depth", depth).putInt("queue_parked", parked).apply()
+    }
+
+    fun queueDepth(context: Context): Int = prefs(context).getInt("queue_depth", 0)
+    fun queueParked(context: Context): Int = prefs(context).getInt("queue_parked", 0)
+
+    fun setBackoff(context: Context, reason: String, untilMillis: Long) {
+        prefs(context).edit().putString("backoff_reason", reason).putLong("backoff_until", untilMillis).apply()
+    }
+
+    fun backoffReason(context: Context): String? = prefs(context).getString("backoff_reason", null)
+    fun backoffUntil(context: Context): Long = prefs(context).getLong("backoff_until", 0L)
+
+    fun setInferencePaused(context: Context, paused: Boolean) {
+        prefs(context).edit().putBoolean("inference_paused", paused).apply()
+    }
+
+    fun inferencePaused(context: Context): Boolean = prefs(context).getBoolean("inference_paused", false)
+
+    fun setFilterStatus(context: Context, whitelist: String, locationSpecies: Int, week48: Int) {
+        prefs(context).edit()
+            .putString("whitelist_status", whitelist)
+            .putInt("location_species", locationSpecies)
+            .putInt("location_week", week48)
+            .apply()
+    }
+
+    fun whitelistStatus(context: Context): String = prefs(context).getString("whitelist_status", "pending") ?: "pending"
+    fun locationSpecies(context: Context): Int = prefs(context).getInt("location_species", -1)
+    fun locationWeek(context: Context): Int = prefs(context).getInt("location_week", 0)
+
+    fun resetIngestStatus(context: Context) {
+        prefs(context).edit()
+            .remove("auth_state").remove("auth_status").remove("auth_at")
+            .remove("last_post_at").remove("backoff_reason").remove("backoff_until")
+            .apply()
+    }
 }
