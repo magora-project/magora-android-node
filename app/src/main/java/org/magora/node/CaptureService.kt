@@ -200,7 +200,7 @@ class CaptureService : Service() {
         current?.worker?.stop()
         val client = SupabaseClient(config, {
             try {
-                CredentialStore.load(this)
+                CredentialStore.load(this, config.nodeId)
             } catch (error: Exception) {
                 DailyLog.append(this, "event=credential_load_error error=${error.javaClass.simpleName}")
                 null
@@ -227,7 +227,7 @@ class CaptureService : Service() {
     private fun analysisLoop() {
         val birdnet = try {
             BirdnetAnalyzer(applicationContext)
-        } catch (error: Exception) {
+        } catch (error: Throwable) {
             DailyLog.append(this, "event=analysis_error error=${error.javaClass.simpleName} at=model_load")
             null
         }
@@ -267,7 +267,7 @@ class CaptureService : Service() {
                 if (config != null && locationFilter == null && !locationFilterFailed) {
                     locationFilter = try {
                         LocationFilter(applicationContext)
-                    } catch (error: Exception) {
+                    } catch (error: Throwable) {
                         locationFilterFailed = true
                         DailyLog.append(this, "event=location_filter_error error=${error.javaClass.simpleName}")
                         null

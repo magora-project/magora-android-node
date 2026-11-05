@@ -26,15 +26,19 @@ class IngestWorker(
 
     fun start() {
         val t = Thread({
-            // One drainer per queue: wait out any previous worker (e.g. one still finishing
-            // an HTTP request after the service was destroyed) before touching the queue.
-            val previous = synchronized(drainers) { drainers.put(queue, Thread.currentThread()) }
+            // Exactly one drainer per queue: the queue's drain lock is held for the whole loop.
+            // A stopped worker still finishing an HTTP request keeps it until that request
+            // ends; a waiter that is stopped gives up without ever taking it.
             try {
-                previous?.join()
+                queue.drainLock.lockInterruptibly()
             } catch (_: InterruptedException) {
                 return@Thread
             }
-            run()
+            try {
+                if (alive) run()
+            } finally {
+                queue.drainLock.unlock()
+            }
         }, "magora-ingest")
         thread = t
         t.start()
@@ -157,8 +161,6 @@ class IngestWorker(
     }
 
     companion object {
-        private val drainers = HashMap<IngestQueue, Thread>()
-
         const val IDLE_MILLIS = 5_000L
         const val MIN_BACKOFF_MILLIS = 5_000L
         const val MAX_BACKOFF_MILLIS = 5L * 60 * 1000

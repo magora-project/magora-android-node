@@ -23,6 +23,10 @@ class IngestQueue internal constructor(
 ) {
     data class Entry(val seq: Long, val table: String, val enqueuedAt: Long, val json: String)
 
+    /** Held by the one worker draining this queue for its whole drain loop. */
+    val drainLock = java.util.concurrent.locks.ReentrantLock()
+    private var lastParkedTrim = 0L
+
     private val queueFile = File(dir, "queue.log")
     private val headFile = File(dir, "head")
     private val parkedFile = File(dir, "parked.log")
@@ -66,6 +70,8 @@ class IngestQueue internal constructor(
             persistHead()
             maybeCompact()
         }
+        // parked.log ages out during operation too (checked at most hourly; cheap when idle).
+        if (clock() - lastParkedTrim >= PARKED_TRIM_INTERVAL_MILLIS) trimParked()
         return entries.firstOrNull()
     }
 
@@ -126,6 +132,7 @@ class IngestQueue internal constructor(
 
     /** parked.log keeps the same 7-day bound as the queue. */
     private fun trimParked() {
+        lastParkedTrim = clock()
         if (!parkedFile.exists()) {
             parked = 0
             return
@@ -181,6 +188,7 @@ class IngestQueue internal constructor(
 
         const val SEVEN_DAYS_MILLIS = 7L * 24 * 60 * 60 * 1000
         const val COMPACT_EVERY = 500
+        const val PARKED_TRIM_INTERVAL_MILLIS = 60L * 60 * 1000
         val TABLES = setOf("detections", "aci_logs")
     }
 }

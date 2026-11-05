@@ -108,8 +108,10 @@ data class NodeConfig(
                 require(email.isNotBlank() && password.isNotEmpty() && anonKey.isNotBlank()) { "empty_credential_field" }
                 require(isPublicKey(anonKey)) { "anon_key_rejected" }
 
-                CredentialStore.save(context, Credentials(email, password))
-                check(CredentialStore.load(context) == Credentials(email, password)) { "credential_readback_failed" }
+                // Credentials are bound to nodeId: if the config write below fails, the old
+                // config can no longer load them, so nothing signs in with a mismatched pair.
+                CredentialStore.save(context, nodeId, Credentials(email, password))
+                check(CredentialStore.load(context, nodeId) == Credentials(email, password)) { "credential_readback_failed" }
                 save(context, NodeConfig(nodeId, json.optString("node_name", ""), lat, lon, url, anonKey))
                 NodeState.resetIngestStatus(context)
                 DailyLog.append(context, "event=config_imported node_id=$nodeId")
@@ -134,8 +136,9 @@ object CredentialStore {
     private const val KEY_ALIAS = "magora_node_credentials"
     private const val TRANSFORMATION = "AES/GCM/NoPadding"
 
-    fun save(context: Context, credentials: NodeConfig.Credentials) {
-        val plain = JSONObject().put("e", credentials.email).put("p", credentials.password).toString()
+    /** Sealed together with [nodeId], so they can only ever be loaded for that node. */
+    fun save(context: Context, nodeId: String, credentials: NodeConfig.Credentials) {
+        val plain = JSONObject().put("n", nodeId).put("e", credentials.email).put("p", credentials.password).toString()
         val cipher = Cipher.getInstance(TRANSFORMATION)
         cipher.init(Cipher.ENCRYPT_MODE, key())
         val sealed = cipher.doFinal(plain.toByteArray(Charsets.UTF_8))
@@ -146,14 +149,28 @@ object CredentialStore {
         check(ok) { "credential prefs write failed" }
     }
 
-    fun load(context: Context): NodeConfig.Credentials? {
+    /**
+     * The credentials sealed for [nodeId], or null when the stored account belongs to another
+     * node (e.g. mid re-provisioning) so a client can never sign in with a different node's
+     * account.
+     */
+    fun load(context: Context, nodeId: String): NodeConfig.Credentials? {
         val p = context.getSharedPreferences(PREFS, Context.MODE_PRIVATE)
         val iv = p.getString("iv", null) ?: return null
         val ct = p.getString("ct", null) ?: return null
         val cipher = Cipher.getInstance(TRANSFORMATION)
         cipher.init(Cipher.DECRYPT_MODE, key(), GCMParameterSpec(128, Base64.decode(iv, Base64.NO_WRAP)))
         val json = JSONObject(String(cipher.doFinal(Base64.decode(ct, Base64.NO_WRAP)), Charsets.UTF_8))
-        return NodeConfig.Credentials(json.getString("e"), json.getString("p"))
+        val credentials = NodeConfig.Credentials(json.getString("e"), json.getString("p"))
+        val bound = json.optString("n", "")
+        if (bound.isEmpty()) {
+            // Sealed by the pre-binding prototype build: accept it only for the node whose
+            // config was imported alongside it, then rebind it.
+            if (NodeConfig.load(context)?.nodeId != nodeId) return null
+            save(context, nodeId, credentials)
+            return credentials
+        }
+        return if (bound == nodeId) credentials else null
     }
 
     private fun key(): SecretKey {

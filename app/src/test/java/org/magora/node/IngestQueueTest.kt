@@ -91,6 +91,33 @@ class IngestQueueTest {
     }
 
     @Test
+    fun parkedRowsAgeOutOnTheSameInstance() {
+        val dir = tmp.newFolder("ingest")
+        var now = 1_000_000_000_000L
+        val q = IngestQueue(dir, clock = { now })
+        q.enqueue("detections", row(1))
+        q.park(q.peek()!!.seq, 422)
+        assertEquals(1, q.parkedCount())
+        now += IngestQueue.SEVEN_DAYS_MILLIS + IngestQueue.PARKED_TRIM_INTERVAL_MILLIS
+        assertNull(q.peek())
+        assertEquals(0, q.parkedCount())
+    }
+
+    @Test
+    fun drainLockAdmitsOneHolderAndACancelledWaiterNeverTakesIt() {
+        val q = IngestQueue(tmp.newFolder("ingest"))
+        q.drainLock.lock() // worker A, still finishing a request
+        val waiter = Thread { try { q.drainLock.lockInterruptibly(); q.drainLock.unlock() } catch (_: InterruptedException) {} }
+        waiter.start()
+        waiter.interrupt() // worker B stopped while waiting
+        waiter.join(2_000)
+        assertEquals(false, waiter.isAlive)
+        assertEquals(true, q.drainLock.isHeldByCurrentThread)
+        q.drainLock.unlock()
+        assertEquals(false, q.drainLock.isLocked)
+    }
+
+    @Test
     fun oneQueueInstancePerDirectory() {
         val dir = tmp.newFolder("ingest")
         assertSame(IngestQueue.forDirectory(dir), IngestQueue.forDirectory(File(dir.path)))
