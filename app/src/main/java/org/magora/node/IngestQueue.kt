@@ -26,6 +26,10 @@ class IngestQueue internal constructor(
     /** Held by the one worker draining this queue for its whole drain loop. */
     val drainLock = java.util.concurrent.locks.ReentrantLock()
     private var lastParkedTrim = 0L
+    private var needsRepair = false
+
+    /** Test seam: the next append writes only this many bytes, then fails. */
+    @Volatile internal var failAppendAfterBytes: Int? = null
 
     private val queueFile = File(dir, "queue.log")
     private val headFile = File(dir, "head")
@@ -45,20 +49,24 @@ class IngestQueue internal constructor(
     fun enqueue(table: String, json: String): Entry {
         require(table in TABLES) { "unknown table" }
         require('\n' !in json && '\r' !in json) { "row JSON must be one line" }
+        // After a failed append the file may end in a partial line. Nothing is appended again
+        // until queue.log has been rewritten whole from memory (the in-memory queue is
+        // authoritative); if that rewrite fails, this append fails too.
+        if (needsRepair) compact()
         val entry = Entry(nextSeq, table, clock(), json)
-        val lengthBefore = queueFile.length()
         try {
             FileOutputStream(queueFile, true).use { out ->
-                out.write("${entry.seq}\t${entry.table}\t${entry.enqueuedAt}\t${entry.json}\n".toByteArray(Charsets.UTF_8))
+                val bytes = "${entry.seq}\t${entry.table}\t${entry.enqueuedAt}\t${entry.json}\n".toByteArray(Charsets.UTF_8)
+                failAppendAfterBytes?.let { cut ->
+                    failAppendAfterBytes = null
+                    out.write(bytes, 0, minOf(cut, bytes.size))
+                    throw java.io.IOException("injected partial append")
+                }
+                out.write(bytes)
                 out.fd.sync()
             }
         } catch (error: Exception) {
-            // Never leave a partial line for the next append to join: cut back to the last whole row.
-            try {
-                java.io.RandomAccessFile(queueFile, "rw").use { it.setLength(lengthBefore) }
-            } catch (_: Exception) {
-                compact()
-            }
+            needsRepair = true
             throw error
         }
         nextSeq++
@@ -172,6 +180,7 @@ class IngestQueue internal constructor(
             for (e in entries) append("${e.seq}\t${e.table}\t${e.enqueuedAt}\t${e.json}\n")
         })
         doneSinceCompaction = 0
+        needsRepair = false
     }
 
     private fun writeAtomically(target: File, text: String) {

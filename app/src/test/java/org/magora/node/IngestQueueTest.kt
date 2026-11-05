@@ -118,6 +118,22 @@ class IngestQueueTest {
     }
 
     @Test
+    fun partialAppendNeverMergesWithTheNextRow() {
+        val dir = tmp.newFolder("ingest")
+        val q = IngestQueue(dir)
+        q.enqueue("aci_logs", row(1))
+        q.failAppendAfterBytes = 12
+        try {
+            q.enqueue("detections", row(2))
+            throw AssertionError("expected the injected failure")
+        } catch (_: java.io.IOException) {
+        }
+        q.enqueue("aci_logs", row(3))
+        // Process dies here; reload must see exactly the two whole rows, in order.
+        assertEquals(listOf(row(1), row(3)), IngestQueue(dir).snapshot().map { it.json })
+    }
+
+    @Test
     fun oneQueueInstancePerDirectory() {
         val dir = tmp.newFolder("ingest")
         assertSame(IngestQueue.forDirectory(dir), IngestQueue.forDirectory(File(dir.path)))
