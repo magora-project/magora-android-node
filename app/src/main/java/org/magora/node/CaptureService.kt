@@ -34,6 +34,12 @@ class CaptureService : Service() {
     }
 
     override fun onStartCommand(intent: Intent?, flags: Int, startId: Int): Int {
+        if (intent?.getBooleanExtra(EXTRA_RESTART_CAPTURE, false) == true) {
+            val oldThread = captureThread
+            running = false
+            oldThread?.interrupt()
+            oldThread?.join(500L)
+        }
         if (!running) startCaptureLoop()
         return START_STICKY
     }
@@ -201,6 +207,7 @@ class CaptureService : Service() {
     }
 
     companion object {
+        const val EXTRA_RESTART_CAPTURE = "restart_capture"
         const val CHANNEL_ID = "magora_node_capture"
         const val NOTIFICATION_ID = 1
     }

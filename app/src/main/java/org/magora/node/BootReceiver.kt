@@ -13,11 +13,7 @@ class BootReceiver : BroadcastReceiver() {
     override fun onReceive(context: Context, intent: Intent) {
         if (intent.action != Intent.ACTION_BOOT_COMPLETED) return
         if (!NodeState.listening(context)) return
-        try {
-            ContextCompat.startForegroundService(context, Intent(context, CaptureService::class.java))
-        } catch (_: Exception) {
-            postResumeNotification(context)
-        }
+        postResumeNotification(context)
     }
 
     companion object {

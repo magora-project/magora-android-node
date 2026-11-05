@@ -59,6 +59,9 @@ class MainActivity : Activity() {
 
     override fun onResume() {
         super.onResume()
+        if (ContextCompat.checkSelfPermission(this, Manifest.permission.RECORD_AUDIO) == PackageManager.PERMISSION_GRANTED) {
+            startCapture(restartExisting = true)
+        }
         handler.postDelayed(this::refreshStatus, 1000)
     }
 
@@ -82,8 +85,10 @@ class MainActivity : Activity() {
         if (requestCode == 1001 && grantResults.firstOrNull() == PackageManager.PERMISSION_GRANTED) startCapture()
     }
 
-    private fun startCapture() {
-        ContextCompat.startForegroundService(this, Intent(this, CaptureService::class.java))
+    private fun startCapture(restartExisting: Boolean = false) {
+        val intent = Intent(this, CaptureService::class.java)
+            .putExtra(CaptureService.EXTRA_RESTART_CAPTURE, restartExisting)
+        ContextCompat.startForegroundService(this, intent)
         refreshStatus()
     }
 
