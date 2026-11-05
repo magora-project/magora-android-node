@@ -7,6 +7,8 @@ android {
     namespace = "org.magora.node"
     compileSdk = 35
 
+    buildToolsVersion = "35.0.0"
+
     defaultConfig {
         applicationId = "org.magora.node"
         minSdk = 26
@@ -27,4 +29,5 @@ android {
 
 dependencies {
     implementation("androidx.core:core-ktx:1.16.0")
+    implementation("androidx.activity:activity-ktx:1.10.1")
 }

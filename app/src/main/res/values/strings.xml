@@ -1,0 +1,7 @@
+<?xml version="1.0" encoding="utf-8"?>
+<resources>
+    <string name="app_name">Magora Prototype Node</string>
+    <string name="channel_name">Magora node capture</string>
+    <string name="notification_title">Magora prototype node</string>
+    <string name="notification_text">Local 15-second capture active</string>
+</resources>
